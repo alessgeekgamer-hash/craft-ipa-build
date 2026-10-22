@@ -78,7 +78,9 @@ int db_init(char *path) {
         "   y float not null,"
         "   z float not null,"
         "   rx float not null,"
-        "   ry float not null"
+        "   ry float not null,"
+        "   gamemode int not null default 0,"
+        "   health int not null default 20"
         ");"
         "create table if not exists block ("
         "    p int not null,"
@@ -146,6 +148,14 @@ int db_init(char *path) {
     if (rc) return rc;
     rc = sqlite3_exec(db, create_query, NULL, NULL, NULL);
     if (rc) return rc;
+    /* migracion de partidas antiguas: si las columnas no existen se
+     * anaden (el primer ALTER falla en bases nuevas y se ignora) */
+    sqlite3_exec(db,
+        "alter table state add column gamemode int not null default 0;",
+        NULL, NULL, NULL);
+    sqlite3_exec(db,
+        "alter table state add column health int not null default 20;",
+        NULL, NULL, NULL);
     rc = sqlite3_prepare_v2(
         db, insert_block_query, -1, &insert_block_stmt, NULL);
     if (rc) return rc;
@@ -299,12 +309,15 @@ int db_auth_get_selected(
     return result;
 }
 
-void db_save_state(float x, float y, float z, float rx, float ry) {
+void db_save_state(float x, float y, float z, float rx, float ry,
+    int gamemode, int health)
+{
     if (!db_enabled) {
         return;
     }
     static const char *query =
-        "insert into state (x, y, z, rx, ry) values (?, ?, ?, ?, ?);";
+        "insert into state (x, y, z, rx, ry, gamemode, health) "
+        "values (?, ?, ?, ?, ?, ?, ?);";
     sqlite3_stmt *stmt;
     sqlite3_exec(db, "delete from state;", NULL, NULL, NULL);
     sqlite3_prepare_v2(db, query, -1, &stmt, NULL);
@@ -313,16 +326,20 @@ void db_save_state(float x, float y, float z, float rx, float ry) {
     sqlite3_bind_double(stmt, 3, z);
     sqlite3_bind_double(stmt, 4, rx);
     sqlite3_bind_double(stmt, 5, ry);
+    sqlite3_bind_int(stmt, 6, gamemode);
+    sqlite3_bind_int(stmt, 7, health);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 }
 
-int db_load_state(float *x, float *y, float *z, float *rx, float *ry) {
+int db_load_state(float *x, float *y, float *z, float *rx, float *ry,
+    int *gamemode, int *health)
+{
     if (!db_enabled) {
         return 0;
     }
     static const char *query =
-        "select x, y, z, rx, ry from state;";
+        "select x, y, z, rx, ry, gamemode, health from state;";
     int result = 0;
     sqlite3_stmt *stmt;
     sqlite3_prepare_v2(db, query, -1, &stmt, NULL);
@@ -332,6 +349,8 @@ int db_load_state(float *x, float *y, float *z, float *rx, float *ry) {
         *z = sqlite3_column_double(stmt, 2);
         *rx = sqlite3_column_double(stmt, 3);
         *ry = sqlite3_column_double(stmt, 4);
+        *gamemode = sqlite3_column_int(stmt, 5);
+        *health = sqlite3_column_int(stmt, 6);
         result = 1;
     }
     sqlite3_finalize(stmt);

@@ -26,6 +26,13 @@
 // (CREATE_CHUNK_RADIUS / RENDER_CHUNK_RADIUS estan mas abajo)
 // Controles tactiles en Android/iOS (0 = desactivar, raton virtual)
 #define TOUCH_CONTROLS 1
+// Sensibilidad del raton (mas bajo = mas lenta la camara en escritorio)
+#define MOUSE_SENSITIVITY 0.0012
+// Escala extra para los gestos tactiles de la camara (compensa la
+// sensibilidad lenta del raton en movil)
+#define TOUCH_LOOK_SCALE 2.0
+// Tecla para alternar entre modo creativo y modo supervivencia
+#define CRAFT_KEY_GAMEMODE 'G'
 // Log de depuracion detallado (0 = silencioso; 1 = imprime cada evento
 // tactil/raton en la consola y en craft_log.txt)
 #define DEBUG_TOUCH 0

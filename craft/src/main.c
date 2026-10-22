@@ -36,6 +36,10 @@
 #define MODE_OFFLINE 0
 #define MODE_ONLINE 1
 
+#define GAME_MODE_SURVIVAL 0
+#define GAME_MODE_CREATIVE 1
+#define MAX_HEALTH 20
+
 #define WORKER_IDLE 0
 #define WORKER_BUSY 1
 #define WORKER_DONE 2
@@ -142,6 +146,18 @@ typedef struct {
     float fov;
     int suppress_char;
     int screenshot_pending;
+    int gamemode;
+    int health;
+    int dead;
+    float dead_time;
+    int left_held;
+    int mining;
+    float mine_progress;
+    int mine_x;
+    int mine_y;
+    int mine_z;
+    float air_peak_y;
+    int was_airborne;
     int mode;
     int mode_changed;
     char db_path[MAX_PATH_LENGTH];
@@ -1660,6 +1676,7 @@ void render_signs(Attrib *attrib, Player *player) {
     glUniformMatrix4fv(attrib->matrix, 1, GL_FALSE, matrix);
     glUniform1i(attrib->sampler, 3);
     glUniform1i(attrib->extra1, 1);
+    glUniform4f(attrib->extra2, 1, 1, 1, 1);
     for (int i = 0; i < g->chunk_count; i++) {
         Chunk *chunk = g->chunks + i;
         if (chunk_distance(chunk, p, q) > g->sign_radius) {
@@ -1691,6 +1708,7 @@ void render_sign(Attrib *attrib, Player *player) {
     glUniformMatrix4fv(attrib->matrix, 1, GL_FALSE, matrix);
     glUniform1i(attrib->sampler, 3);
     glUniform1i(attrib->extra1, 1);
+    glUniform4f(attrib->extra2, 1, 1, 1, 1);
     char text[MAX_SIGN_LENGTH];
     strncpy(text, g->typing_buffer + 1, MAX_SIGN_LENGTH);
     text[MAX_SIGN_LENGTH - 1] = '\0';
@@ -1752,6 +1770,15 @@ void render_wireframe(Attrib *attrib, Player *player) {
         GLuint wireframe_buffer = gen_wireframe_buffer(hx, hy, hz, 0.53);
         draw_lines(attrib, wireframe_buffer, 3, 24);
         del_buffer(wireframe_buffer);
+        /* animacion de minado: marco interior que se va cerrando */
+        if (g->mining && hx == g->mine_x && hy == g->mine_y &&
+            hz == g->mine_z)
+        {
+            float k = 1.0f - 0.35f * MIN(g->mine_progress, 1.0f);
+            GLuint mb = gen_wireframe_buffer(hx, hy, hz, 0.53f * k);
+            draw_lines(attrib, mb, 3, 24);
+            del_buffer(mb);
+        }
 #ifndef CRAFT_MOBILE
         glDisable(GL_COLOR_LOGIC_OP);
 #endif
@@ -1780,6 +1807,43 @@ void render_crosshairs(Attrib *attrib) {
 #endif
 }
 
+/* Barra de progreso del minado (justo debajo de la mira) */
+void render_mining_bar(Attrib *attrib) {
+    if (!g->mining || g->dead) {
+        return;
+    }
+    float w = 60 * g->scale;
+    float h = 6 * g->scale;
+    float x0 = g->width / 2 - w / 2;
+    float y0 = g->height / 2 - 30 * g->scale;
+    float matrix[16];
+    set_matrix_2d(matrix, g->width, g->height);
+    glUseProgram(attrib->program);
+    glUniformMatrix4fv(attrib->matrix, 1, GL_FALSE, matrix);
+    glUniform4f(attrib->extra1, 1, 1, 1, 1);
+    /* contorno */
+    float outline[] = {
+        x0, y0, x0 + w, y0,
+        x0 + w, y0, x0 + w, y0 + h,
+        x0 + w, y0 + h, x0, y0 + h,
+        x0, y0 + h, x0, y0
+    };
+    GLuint ob = gen_buffer(sizeof(outline), outline);
+    glLineWidth(2 * g->scale);
+    draw_lines(attrib, ob, 2, 8);
+    del_buffer(ob);
+    /* relleno: crece con el progreso */
+    float p = MIN(g->mine_progress, 1.0f);
+    if (p > 0.05f) {
+        float cy = y0 + h / 2;
+        float fill[] = {x0 + 2, cy, x0 + (w - 2) * p, cy};
+        GLuint fb = gen_buffer(sizeof(fill), fill);
+        glLineWidth(h);
+        draw_lines(attrib, fb, 2, 1);
+        del_buffer(fb);
+    }
+}
+
 void render_item(Attrib *attrib) {
     float matrix[16];
     set_matrix_item(matrix, g->width, g->height, g->scale);
@@ -1801,8 +1865,9 @@ void render_item(Attrib *attrib) {
     }
 }
 
-void render_text(
-    Attrib *attrib, int justify, float x, float y, float n, char *text)
+void render_text_rgb(
+    Attrib *attrib, int justify, float x, float y, float n, char *text,
+    float cr, float cg, float cb)
 {
     float matrix[16];
     set_matrix_2d(matrix, g->width, g->height);
@@ -1810,11 +1875,18 @@ void render_text(
     glUniformMatrix4fv(attrib->matrix, 1, GL_FALSE, matrix);
     glUniform1i(attrib->sampler, 1);
     glUniform1i(attrib->extra1, 0);
+    glUniform4f(attrib->extra2, cr, cg, cb, 1);
     int length = strlen(text);
     x -= n * justify * (length - 1) / 2;
     GLuint buffer = gen_text_buffer(x, y, n, text);
     draw_text(attrib, buffer, length);
     del_buffer(buffer);
+}
+
+void render_text(
+    Attrib *attrib, int justify, float x, float y, float n, char *text)
+{
+    render_text_rgb(attrib, justify, x, y, n, text, 1, 1, 1);
 }
 
 void add_message(const char *text) {
@@ -2034,6 +2106,113 @@ void tree(Block *block) {
     }
 }
 
+/* ==================================================================== */
+/* MODOS DE JUEGO (supervivencia / creativo), VIDA Y MUERTE             */
+/* ==================================================================== */
+const char *gamemode_name(int mode) {
+    return mode == GAME_MODE_CREATIVE ? "Creativo" : "Supervivencia";
+}
+
+void set_gamemode(int mode) {
+    if (g->gamemode == mode) {
+        return;
+    }
+    g->gamemode = mode;
+    g->mining = 0;
+    g->mine_progress = 0;
+    if (mode == GAME_MODE_SURVIVAL) {
+        g->flying = 0;              // en supervivencia no se vuela
+        if (g->health <= 0) {
+            g->health = MAX_HEALTH;
+        }
+    }
+    else {
+        g->health = MAX_HEALTH;     // el creativo siempre esta a maxima vida
+        g->dead = 0;
+    }
+    char msg[64];
+    snprintf(msg, sizeof(msg), "Modo: %s", gamemode_name(mode));
+    add_message(msg);
+}
+
+void respawn() {
+    State *s = &g->players->state;
+    s->x = 0;
+    s->z = 0;
+    s->y = highest_block(0, 0) + 2;
+    s->rx = 0;
+    s->ry = 0;
+    g->health = MAX_HEALTH;
+    g->dead = 0;
+    g->dead_time = 0;
+    g->was_airborne = 0;
+    g->mining = 0;
+    g->mine_progress = 0;
+    add_message("Has reaparecido");
+}
+
+void kill_player(const char *reason) {
+    if (g->dead) {
+        return;
+    }
+    g->dead = 1;
+    g->dead_time = 0;
+    g->flying = 0;
+    g->mining = 0;
+    g->mine_progress = 0;
+    char msg[96];
+    snprintf(msg, sizeof(msg), "Has muerto! (%s)", reason);
+    add_message(msg);
+}
+
+void damage_player(int amount, const char *reason) {
+    if (g->dead || g->gamemode != GAME_MODE_SURVIVAL || amount <= 0) {
+        return;
+    }
+    g->health -= amount;
+    char msg[64];
+    snprintf(msg, sizeof(msg), "-%d de vida", amount);
+    add_message(msg);
+    if (g->health <= 0) {
+        g->health = 0;
+        kill_player(reason);
+    }
+}
+
+/* Tiempo en segundos que cuesta romper un bloque en modo supervivencia */
+float block_hardness(int w) {
+    if (!w) {
+        return 1.0f;
+    }
+    if (is_plant(w)) {
+        return 0.1f;
+    }
+    switch (w) {
+    case GLASS:
+    case SNOW:
+        return 0.3f;
+    case GRASS:
+    case DIRT:
+    case SAND:
+        return 0.6f;
+    case STONE:
+    case CEMENT:
+    case COBBLE:
+    case LIGHT_STONE:
+    case DARK_STONE:
+    case BRICK:
+        return 2.0f;
+    case WOOD:
+    case PLANK:
+    case CHEST:
+        return 1.5f;
+    case LEAVES:
+        return 0.2f;
+    default:
+        return 1.0f;    // lanas de colores, etc.
+    }
+}
+
 void parse_command(const char *buffer, int forward) {
     char username[128] = {0};
     char token[128] = {0};
@@ -2087,6 +2266,30 @@ void parse_command(const char *buffer, int forward) {
         else {
             add_message("Viewing distance must be between 1 and 24.");
         }
+    }
+    else if (sscanf(buffer, "/gamemode %127s", token) == 1) {
+        if (strcmp(token, "1") == 0 || strcmp(token, "creative") == 0) {
+            set_gamemode(GAME_MODE_CREATIVE);
+        }
+        else if (strcmp(token, "0") == 0 || strcmp(token, "survival") == 0) {
+            set_gamemode(GAME_MODE_SURVIVAL);
+        }
+        else {
+            add_message("Uso: /gamemode creative|survival");
+        }
+    }
+    else if (strcmp(buffer, "/creative") == 0) {
+        set_gamemode(GAME_MODE_CREATIVE);
+    }
+    else if (strcmp(buffer, "/survival") == 0) {
+        set_gamemode(GAME_MODE_SURVIVAL);
+    }
+    else if (strcmp(buffer, "/heal") == 0) {
+        g->health = MAX_HEALTH;
+        add_message("Vida restaurada");
+    }
+    else if (strcmp(buffer, "/kill") == 0) {
+        kill_player("comando /kill");
     }
     else if (strcmp(buffer, "/copy") == 0) {
         copy();
@@ -2154,6 +2357,11 @@ void on_light() {
 }
 
 void on_left_click() {
+    /* En creativo el bloque se rompe al instante; en supervivencia el
+     * bloque se rompe sosteniendo el boton (ver update_mining). */
+    if (g->gamemode != GAME_MODE_CREATIVE) {
+        return;
+    }
     State *s = &g->players->state;
     int hx, hy, hz;
     int hw = hit_test(0, s->x, s->y, s->z, s->rx, s->ry, &hx, &hy, &hz);
@@ -2339,8 +2547,12 @@ void on_key(GLFWwindow *window, int key, int scancode, int action, int mods) {
         }
     }
     if (!g->typing) {
-        if (key == CRAFT_KEY_FLY) {
+        if (key == CRAFT_KEY_FLY && g->gamemode == GAME_MODE_CREATIVE) {
             g->flying = !g->flying;
+        }
+        if (key == CRAFT_KEY_GAMEMODE) {
+            set_gamemode(g->gamemode == GAME_MODE_CREATIVE ?
+                GAME_MODE_SURVIVAL : GAME_MODE_CREATIVE);
         }
         if (key >= '1' && key <= '9') {
             g->item_index = key - '1';
@@ -2424,9 +2636,13 @@ void on_mouse_button(GLFWwindow *window, int button, int action, int mods) {
         button, action, exclusive);
 #endif
     if (action != GLFW_PRESS) {
+        if (button == GLFW_MOUSE_BUTTON_LEFT) {
+            g->left_held = 0;   // suelto el boton: corta el minado
+        }
         return;
     }
     if (button == GLFW_MOUSE_BUTTON_LEFT) {
+        g->left_held = 1;       // mantengo el boton: mina sosteniendo
         if (exclusive) {
             if (control) {
                 on_right_click();
@@ -2493,6 +2709,7 @@ void create_window() {
 #define TOUCH_ACTION_FLY    3
 #define TOUCH_ACTION_NEXT   4
 #define TOUCH_ACTION_PREV   5
+#define TOUCH_ACTION_GAMEMODE 6
 
 typedef struct {
     float x, y, w, h;       /* rectangulo (coordenadas y-up: y=0 abajo) */
@@ -2500,7 +2717,7 @@ typedef struct {
     int action;
 } TouchButton;
 
-#define TOUCH_BUTTONS 6
+#define TOUCH_BUTTONS 7
 static TouchButton tb[TOUCH_BUTTONS];
 static int touch_btn_finger = -1;
 static int touch_btn_action = -1;
@@ -2528,6 +2745,8 @@ static void touch_layout() {
         TOUCH_ACTION_BREAK};
     tb[i++] = (TouchButton){W - m - s, m * 4 + s * 3, s, s, "VOLAR",
         TOUCH_ACTION_FLY};
+    tb[i++] = (TouchButton){W - m - s, m * 5 + s * 4, s, s, "MODO",
+        TOUCH_ACTION_GAMEMODE};
     /* cambiar de bloque, junto al boton JUMP */
     tb[i++] = (TouchButton){W - m * 2 - s * 2, m, s, s, ">", TOUCH_ACTION_NEXT};
     tb[i++] = (TouchButton){W - m * 3 - s * 3, m, s, s, "<", TOUCH_ACTION_PREV};
@@ -2564,9 +2783,13 @@ static void touch_action(TouchButton *b, int press) {
         }
         break;
     case TOUCH_ACTION_BREAK:
+        /* mantener pulsado = minar; soltar = parar */
+        on_mouse_button(g->window, GLFW_MOUSE_BUTTON_LEFT,
+            press ? GLFW_PRESS : GLFW_RELEASE, 0);
+        break;
+    case TOUCH_ACTION_GAMEMODE:
         if (press) {
-            on_mouse_button(g->window, GLFW_MOUSE_BUTTON_LEFT,
-                GLFW_PRESS, 0);
+            on_key(g->window, CRAFT_KEY_GAMEMODE, 0, GLFW_PRESS, 0);
         }
         break;
     case TOUCH_ACTION_FLY:
@@ -2643,6 +2866,10 @@ void on_touch(int type, long finger, double wx, double wy,
                 tap_y = yd;
                 tap_start = SDL_GetTicks();
                 tap_moved = 0;
+                /* mantener el dedo quieto = minar (como Minecraft PE);
+                 * al arrastrar se para (ver MOVE mas abajo) */
+                on_mouse_button(g->window, GLFW_MOUSE_BUTTON_LEFT,
+                    GLFW_PRESS, 0);
             }
         }
         return;
@@ -2658,14 +2885,19 @@ void on_touch(int type, long finger, double wx, double wy,
             touch_set_move_keys(stick_dx, stick_dy);
         }
         if ((int)finger == touch_look_finger) {
-            glfwshim_add_relative(xd - look_x, yd - look_y);
+            glfwshim_add_relative(
+                (xd - look_x) * TOUCH_LOOK_SCALE,
+                (yd - look_y) * TOUCH_LOOK_SCALE);
             look_x = xd;
             look_y = yd;
             if (tap_finger == (int)finger) {
                 float dx = xd - tap_x;
                 float dy = yd - tap_y;
-                if (dx * dx + dy * dy > 14.0f * 14.0f) {
+                if (!tap_moved && dx * dx + dy * dy > 14.0f * 14.0f) {
                     tap_moved = 1;
+                    /* al arrastrar dejo de minar (solo se mira) */
+                    on_mouse_button(g->window, GLFW_MOUSE_BUTTON_LEFT,
+                        GLFW_RELEASE, 0);
                 }
             }
         }
@@ -2692,6 +2924,9 @@ void on_touch(int type, long finger, double wx, double wy,
                 on_mouse_button(g->window, GLFW_MOUSE_BUTTON_LEFT,
                     GLFW_PRESS, 0);
             }
+            /* suelto el minado mantenido */
+            on_mouse_button(g->window, GLFW_MOUSE_BUTTON_LEFT,
+                GLFW_RELEASE, 0);
             touch_look_finger = -1;
             tap_finger = -1;
         }
@@ -2785,6 +3020,9 @@ void handle_movement(double dt) {
     State *s = &g->players->state;
     int sz = 0;
     int sx = 0;
+    if (g->dead) {
+        return;                 // muerto: no hay movimiento
+    }
     if (!g->typing) {
         float m = dt * 1.0;
         g->ortho = glfwGetKey(g->window, CRAFT_KEY_ORTHO) ? 64 : 0;
@@ -2837,6 +3075,72 @@ void handle_movement(double dt) {
     }
     if (s->y < 0) {
         s->y = highest_block(s->x, s->z) + 2;
+    }
+
+    /* dano por caida (solo en supervivencia y sin volar) */
+    if (g->gamemode == GAME_MODE_SURVIVAL && !g->flying) {
+        int ground = is_obstacle(get_block(
+            roundf(s->x), roundf(s->y) - 1, roundf(s->z)));
+        if (!ground) {
+            if (!g->was_airborne) {
+                g->was_airborne = 1;
+                g->air_peak_y = s->y;
+            }
+            else if (s->y > g->air_peak_y) {
+                g->air_peak_y = s->y;
+            }
+        }
+        else {
+            if (g->was_airborne) {
+                float fallen = g->air_peak_y - s->y;
+                if (fallen > 3.5f) {
+                    damage_player(MAX(1, (int)(fallen - 3.0f)), "una caida");
+                }
+            }
+            g->was_airborne = 0;
+            g->air_peak_y = s->y;
+        }
+    }
+}
+
+/* ==================================================================== */
+/* MINADO - mantener pulsado el boton izquierdo (raton o boton ROMPER)   */
+/* rompe el bloque poco a poco segun su dureza. En creativo es casi     */
+/* instantanteo (como en Minecraft). El progreso se dibuja con la barra */
+/* render_mining_bar y el marco que se cierra en render_wireframe.       */
+/* ==================================================================== */
+void update_mining(double dt) {
+    if (g->dead || g->typing || !g->left_held) {
+        g->mining = 0;
+        g->mine_progress = 0;
+        return;
+    }
+    State *s = &g->players->state;
+    int hx, hy, hz;
+    int hw = hit_test(0, s->x, s->y, s->z, s->rx, s->ry, &hx, &hy, &hz);
+    if (!hw || hy <= 0 || hy >= 256 || !is_destructable(hw)) {
+        g->mining = 0;
+        g->mine_progress = 0;
+        return;
+    }
+    if (!g->mining || hx != g->mine_x || hy != g->mine_y || hz != g->mine_z) {
+        g->mining = 1;
+        g->mine_progress = 0;
+        g->mine_x = hx;
+        g->mine_y = hy;
+        g->mine_z = hz;
+    }
+    float need = g->gamemode == GAME_MODE_CREATIVE ?
+        0.25f : block_hardness(hw);
+    g->mine_progress += dt / MAX(need, 0.05f);
+    if (g->mine_progress >= 1) {
+        set_block(hx, hy, hz, 0);
+        record_block(hx, hy, hz, 0);
+        if (is_plant(get_block(hx, hy + 1, hz))) {
+            set_block(hx, hy + 1, hz, 0);
+        }
+        g->mining = 0;
+        g->mine_progress = 0;
     }
 }
 
@@ -2946,6 +3250,12 @@ void reset_model() {
     g->observe2 = 0;
     g->flying = 0;
     g->item_index = 0;
+    g->mining = 0;
+    g->mine_progress = 0;
+    g->left_held = 0;
+    g->dead = 0;
+    g->dead_time = 0;
+    g->was_airborne = 0;
     memset(g->typing_buffer, 0, sizeof(char) * MAX_TEXT_LENGTH);
     g->typing = 0;
     memset(g->messages, 0, sizeof(char) * MAX_MESSAGES * MAX_TEXT_LENGTH);
@@ -3073,6 +3383,7 @@ int main(int argc, char **argv) {
     text_attrib.matrix = glGetUniformLocation(program, "matrix");
     text_attrib.sampler = glGetUniformLocation(program, "sampler");
     text_attrib.extra1 = glGetUniformLocation(program, "is_sign");
+    text_attrib.extra2 = glGetUniformLocation(program, "text_color");
 
     program = load_program(
         "shaders/sky_vertex.glsl", "shaders/sky_fragment.glsl");
@@ -3177,10 +3488,30 @@ int main(int argc, char **argv) {
         g->player_count = 1;
 
         // LOAD STATE FROM DATABASE //
-        int loaded = db_load_state(&s->x, &s->y, &s->z, &s->rx, &s->ry);
+        int loaded = db_load_state(&s->x, &s->y, &s->z, &s->rx, &s->ry,
+            &g->gamemode, &g->health);
         force_chunks(me);
         if (!loaded) {
             s->y = highest_block(s->x, s->z) + 2;
+        }
+
+        // SANIDAD DEL ESTADO GUARDADO //
+        if (g->gamemode != GAME_MODE_CREATIVE) {
+            g->gamemode = GAME_MODE_SURVIVAL;
+        }
+        if (g->health <= 0 || g->health > MAX_HEALTH ||
+            g->gamemode == GAME_MODE_CREATIVE)
+        {
+            g->health = MAX_HEALTH;
+        }
+        if (g->gamemode == GAME_MODE_SURVIVAL) {
+            g->flying = 0;
+        }
+        {
+            char mode_msg[64];
+            snprintf(mode_msg, sizeof(mode_msg), "Modo: %s (tecla G)",
+                gamemode_name(g->gamemode));
+            add_message(mode_msg);
         }
 
         // BEGIN MAIN LOOP //
@@ -3211,6 +3542,15 @@ int main(int argc, char **argv) {
 
             // HANDLE MOVEMENT //
             handle_movement(dt);
+
+            // MINADO Y REAPARICION //
+            update_mining(dt);
+            if (g->dead) {
+                g->dead_time += dt;
+                if (g->dead_time > 3) {
+                    respawn();
+                }
+            }
 
             // HANDLE DATA FROM SERVER //
             char *buffer = client_recv();
@@ -3260,6 +3600,7 @@ int main(int argc, char **argv) {
             if (SHOW_CROSSHAIRS) {
                 render_crosshairs(&line_attrib);
             }
+            render_mining_bar(&line_attrib);
             if (SHOW_ITEM) {
                 render_item(&block_attrib);
             }
@@ -3309,6 +3650,29 @@ int main(int argc, char **argv) {
                         g->width / 2, g->height / 2 - ts - 24, ts,
                         other->name);
                 }
+            }
+
+            // VIDA (solo modo supervivencia) //
+            if (SHOW_INFO_TEXT && g->gamemode == GAME_MODE_SURVIVAL &&
+                !g->dead)
+            {
+                snprintf(text_buffer, 1024, "VIDA: %d/%d",
+                    g->health, MAX_HEALTH);
+                render_text_rgb(&text_attrib, ALIGN_LEFT, tx, ty, ts,
+                    text_buffer, 1, 0.25f, 0.25f);
+                ty -= ts * 2;
+            }
+
+            // PANTALLA DE MUERTE //
+            if (g->dead) {
+                snprintf(text_buffer, 1024, "HAS MUERTO");
+                render_text_rgb(&text_attrib, ALIGN_CENTER,
+                    g->width / 2, g->height / 2, 3 * g->scale,
+                    text_buffer, 1, 0.15f, 0.15f);
+                snprintf(text_buffer, 1024, "Reapareciendo...");
+                render_text_rgb(&text_attrib, ALIGN_CENTER,
+                    g->width / 2, g->height / 2 - 8 * g->scale,
+                    1.5f * g->scale, text_buffer, 1, 1, 1);
             }
 
             // RENDER TOUCH UI (Android / iOS) //
@@ -3371,7 +3735,8 @@ int main(int argc, char **argv) {
         }
 
         // SHUTDOWN //
-        db_save_state(s->x, s->y, s->z, s->rx, s->ry);
+        db_save_state(s->x, s->y, s->z, s->rx, s->ry,
+            g->gamemode, g->health);
         db_close();
         db_disable();
         client_stop();

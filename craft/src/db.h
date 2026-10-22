@@ -10,6 +10,7 @@ int get_db_enabled();
 int db_init(char *path);
 void db_close();
 void db_commit();
+
 void db_auth_set(char *username, char *identity_token);
 int db_auth_select(char *username);
 void db_auth_select_none();
@@ -19,12 +20,15 @@ int db_auth_get(
 int db_auth_get_selected(
     char *username, int username_length,
     char *identity_token, int identity_token_length);
-void db_save_state(float x, float y, float z, float rx, float ry);
-int db_load_state(float *x, float *y, float *z, float *rx, float *ry);
+
+void db_save_state(float x, float y, float z, float rx, float ry,
+    int gamemode, int health);
+int db_load_state(float *x, float *y, float *z, float *rx, float *ry,
+    int *gamemode, int *health);
+
 void db_insert_block(int p, int q, int x, int y, int z, int w);
 void db_insert_light(int p, int q, int x, int y, int z, int w);
-void db_insert_sign(
-    int p, int q, int x, int y, int z, int face, const char *text);
+void db_insert_sign(int p, int q, int x, int y, int z, int face, const char *text);
 void db_delete_sign(int x, int y, int z, int face);
 void db_delete_signs(int x, int y, int z);
 void db_delete_all_signs();
