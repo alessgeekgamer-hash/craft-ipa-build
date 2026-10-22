@@ -1,0 +1,66 @@
+name: Build IPA (Craft)
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Compilar .ipa (iOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout puerto
+        uses: actions/checkout@v4
+
+      - name: Descargar SDL2
+        run: |
+          curl -L -o SDL2.zip https://github.com/libsdl-org/SDL/releases/download/release-2.30.11/SDL2-2.30.11.zip
+          unzip -q SDL2.zip -d sdl2
+          rm SDL2.zip
+          ls sdl2/SDL2-2.30.11 | head
+
+      - name: Obtener toolchain ios-cmake
+        uses: actions/checkout@v4
+        with:
+          repository: leetal/ios-cmake
+          path: ios-cmake
+
+      - name: Configurar (CMake + Xcode, arm64 de dispositivo)
+        run: |
+          cmake -S craft -B build-ios -G Xcode \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/ios-cmake/ios.toolchain.cmake" \
+            -DPLATFORM=OS64 \
+            -DDEPLOYMENT_TARGET=12.0
+
+      - name: Compilar
+        run: cmake --build build-ios --config Release
+
+      - name: Launch screen + verificacion del bundle
+        run: |
+          APP=$(find build-ios -name "craft.app" -type d | head -n1)
+          echo "Bundle encontrado: $APP"
+          test -n "$APP"
+          ls -la "$APP"
+          test -x "$APP/craft"
+          test -f "$APP/textures/texture.png"
+          test -f "$APP/shaders/block_vertex.glsl"
+          test -f "$APP/Icon-180.png"
+          ibtool --compile "$APP/LaunchScreen.storyboardc" ios/LaunchScreen.storyboard
+          /usr/libexec/PlistBuddy -c "Add :UILaunchStoryboardName string LaunchScreen" "$APP/Info.plist"
+
+      - name: Empaquetar .ipa
+        run: |
+          APP=$(find build-ios -name "craft.app" -type d | head -n1)
+          rm -rf Payload
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry Craft-Port.ipa Payload
+          ls -la Craft-Port.ipa
+          unzip -l Craft-Port.ipa | head -20
+
+      - name: Subir IPA como artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Craft-Port-ipa
+          path: Craft-Port.ipa
+          if-no-files-found: error
