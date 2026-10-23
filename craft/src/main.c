@@ -1785,6 +1785,59 @@ void render_wireframe(Attrib *attrib, Player *player) {
     }
 }
 
+/* ==================================================================== */
+/* CORAZONES DE VIDA (estilo Minecraft)                                  */
+/* Se dibujan con la fuente font.png: celda 95 = lleno, 96 = medio,     */
+/* 97 = vacio (pintados por paint_hearts.ps1). Cada corazon = 2 de vida */
+/* ==================================================================== */
+GLuint gen_hearts_buffer(float x, float y, float n, int health) {
+    int hearts = 10;
+    float s = 0.0625;
+    float a = s;
+    float b = s * 2;
+    GLfloat *data = malloc_faces(4, hearts);
+    for (int i = 0; i < hearts; i++) {
+        int cell = 97;                  /* vacio */
+        int hp = health - i * 2;
+        if (hp >= 2) {
+            cell = 95;                  /* lleno */
+        }
+        else if (hp == 1) {
+            cell = 96;                  /* medio */
+        }
+        float du = (cell % 16) * a;
+        float dv = 1 - (cell / 16) * b - b;
+        float cx = x + i * n * 3 / 2;
+        float *d = data + i * 24;
+        *(d++) = cx - n / 2; *(d++) = y - n;
+        *(d++) = du + 0;     *(d++) = dv;
+        *(d++) = cx + n / 2; *(d++) = y - n;
+        *(d++) = du + a;     *(d++) = dv;
+        *(d++) = cx + n / 2; *(d++) = y + n;
+        *(d++) = du + a;     *(d++) = dv + b;
+        *(d++) = cx - n / 2; *(d++) = y - n;
+        *(d++) = du + 0;     *(d++) = dv;
+        *(d++) = cx + n / 2; *(d++) = y + n;
+        *(d++) = du + a;     *(d++) = dv + b;
+        *(d++) = cx - n / 2; *(d++) = y + n;
+        *(d++) = du + 0;     *(d++) = dv + b;
+    }
+    return gen_faces(4, hearts, data);
+}
+
+void render_hearts(Attrib *attrib, float x, float y, float n, int health) {
+    float matrix[16];
+    set_matrix_2d(matrix, g->width, g->height);
+    glUseProgram(attrib->program);
+    glUniformMatrix4fv(attrib->matrix, 1, GL_FALSE, matrix);
+    glUniform1i(attrib->sampler, 1);
+    glUniform1i(attrib->extra1, 0);
+    glUniform4f(attrib->extra2, 1, 1, 1, 1);
+    GLuint buffer = gen_hearts_buffer(x, y, n, health);
+    draw_text(attrib, buffer, 10);
+    del_buffer(buffer);
+}
+
 void render_crosshairs(Attrib *attrib) {
     float matrix[16];
     set_matrix_2d(matrix, g->width, g->height);
@@ -2357,25 +2410,13 @@ void on_light() {
 }
 
 void on_left_click() {
-    /* En creativo el bloque se rompe al instante; en supervivencia el
-     * bloque se rompe sosteniendo el boton (ver update_mining). */
-    if (g->gamemode != GAME_MODE_CREATIVE) {
-        return;
-    }
-    State *s = &g->players->state;
-    int hx, hy, hz;
-    int hw = hit_test(0, s->x, s->y, s->z, s->rx, s->ry, &hx, &hy, &hz);
+    /* El bloque se rompe SOSTENIENDO el boton izquierdo (ver
+     * update_mining), asi la barra de progreso y la animacion se ven
+     * SIEMPRE, igual que en Minecraft. Un clic rapido ya no rompe el
+     * bloque al instante. */
 #if DEBUG_TOUCH
-    SDL_Log("LEFT_CLICK hw=%d aim=(%d,%d,%d) pos=(%.2f,%.2f,%.2f)",
-        hw, hx, hy, hz, s->x, s->y, s->z);
+    SDL_Log("LEFT_CLICK (el minado lo gestiona update_mining)");
 #endif
-    if (hy > 0 && hy < 256 && is_destructable(hw)) {
-        set_block(hx, hy, hz, 0);
-        record_block(hx, hy, hz, 0);
-        if (is_plant(get_block(hx, hy + 1, hz))) {
-            set_block(hx, hy + 1, hz, 0);
-        }
-    }
 }
 
 void on_right_click() {
@@ -3131,7 +3172,7 @@ void update_mining(double dt) {
         g->mine_z = hz;
     }
     float need = g->gamemode == GAME_MODE_CREATIVE ?
-        0.25f : block_hardness(hw);
+        0.15f : block_hardness(hw);
     g->mine_progress += dt / MAX(need, 0.05f);
     if (g->mine_progress >= 1) {
         set_block(hx, hy, hz, 0);
@@ -3652,15 +3693,10 @@ int main(int argc, char **argv) {
                 }
             }
 
-            // VIDA (solo modo supervivencia) //
-            if (SHOW_INFO_TEXT && g->gamemode == GAME_MODE_SURVIVAL &&
-                !g->dead)
-            {
-                snprintf(text_buffer, 1024, "VIDA: %d/%d",
-                    g->health, MAX_HEALTH);
-                render_text_rgb(&text_attrib, ALIGN_LEFT, tx, ty, ts,
-                    text_buffer, 1, 0.25f, 0.25f);
-                ty -= ts * 2;
+            // CORAZONES DE VIDA (solo modo supervivencia) //
+            if (g->gamemode == GAME_MODE_SURVIVAL && !g->dead) {
+                render_hearts(&text_attrib, tx + ts, ty - ts / 2, ts,
+                    g->health);
             }
 
             // PANTALLA DE MUERTE //
